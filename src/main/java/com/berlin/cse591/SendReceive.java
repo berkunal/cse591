@@ -1,294 +1,178 @@
 package com.berlin.cse591;
 
-import com.microsoft.azure.sdk.iot.device.*;
-import com.microsoft.azure.sdk.iot.device.transport.IotHubConnectionStatus;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
 
-import java.io.IOException;
-import java.net.URISyntaxException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Scanner;
+import com.azure.core.amqp.AmqpTransportType;
+import com.azure.core.amqp.ProxyAuthenticationType;
+import com.azure.core.amqp.ProxyOptions;
+import com.azure.messaging.eventhubs.EventHubClientBuilder;
+import com.azure.messaging.eventhubs.EventHubConsumerAsyncClient;
+import com.azure.messaging.eventhubs.models.EventPosition;
 
 /**
  * Handles messages from an IoT Hub. Default protocol is to use MQTT transport.
  */
 public class SendReceive {
-    private static final int D2C_MESSAGE_TIMEOUT = 2000; // 2 seconds
-    private static final List<String> failedMessageListOnClose = new ArrayList<>(); // List of messages that failed on
-                                                                                    // close
+    private static final String EH_COMPATIBLE_CONNECTION_STRING_FORMAT = "Endpoint=%s/;EntityPath=%s;"
+    + "SharedAccessKeyName=%s;SharedAccessKey=%s";
 
-    /** Used as a counter in the message callback. */
-    protected static class Counter {
-        protected int num;
+    // az iot hub show --query properties.eventHubEndpoints.events.endpoint --name
+    // {your IoT Hub name}
+    private static final String EVENT_HUBS_COMPATIBLE_ENDPOINT = "sb://iothub-ns-iothub-axw-9645102-73f6f9eaef.servicebus.windows.net/";
 
-        public Counter(int num) {
-            this.num = num;
-        }
+    // az iot hub show --query properties.eventHubEndpoints.events.path --name {your
+    // IoT Hub name}
+    private static final String EVENT_HUBS_COMPATIBLE_PATH = "iothub-axwef";
 
-        public int get() {
-            return this.num;
-        }
+    // az iot hub policy show --name service --query primaryKey --hub-name {your IoT
+    // Hub name}
+    private static final String IOT_HUB_SAS_KEY = "XEHpNHL4Z6/EFKI9KDLoUDR3UBH/A2N9dFO43JLg0/U=";
+    private static final String IOT_HUB_SAS_KEY_NAME = "service";
 
-        public void increment() {
-            this.num++;
-        }
+    /**
+     * The main method to start the sample application that receives events from
+     * Event Hubs sent from an IoT Hub device.
+     *
+     * @param args ignored args.
+     * @throws Exception if there's an error running the application.
+     */
+    public static void main(String[] args) throws Exception {
 
-        @Override
-        public String toString() {
-            return Integer.toString(this.num);
-        }
-    }
+        // Build the Event Hubs compatible connection string.
+        String eventHubCompatibleConnectionString = String.format(EH_COMPATIBLE_CONNECTION_STRING_FORMAT,
+                EVENT_HUBS_COMPATIBLE_ENDPOINT, EVENT_HUBS_COMPATIBLE_PATH, IOT_HUB_SAS_KEY_NAME, IOT_HUB_SAS_KEY);
 
-    protected static class MessageCallback implements com.microsoft.azure.sdk.iot.device.MessageCallback {
-        public IotHubMessageResult execute(Message msg, Object context) {
-            Counter counter = (Counter) context;
-            System.out.println("Received message " + counter.toString() + " with content: "
-                    + new String(msg.getBytes(), Message.DEFAULT_IOTHUB_MESSAGE_CHARSET));
-            for (MessageProperty messageProperty : msg.getProperties()) {
-                System.out.println(messageProperty.getName() + " : " + messageProperty.getValue());
-            }
+        // Setup the EventHubBuilder by configuring various options as needed.
+        EventHubClientBuilder eventHubClientBuilder = new EventHubClientBuilder()
+                .consumerGroup(EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
+                .connectionString(eventHubCompatibleConnectionString);
 
-            int switchVal = counter.get() % 3;
-            IotHubMessageResult res;
-            switch (switchVal) {
-            case 0:
-                res = IotHubMessageResult.COMPLETE;
-                break;
-            case 1:
-                res = IotHubMessageResult.ABANDON;
-                break;
-            case 2:
-                res = IotHubMessageResult.REJECT;
-                break;
-            default:
-                // should never happen.
-                throw new IllegalStateException("Invalid message result specified.");
-            }
+        // uncomment to setup proxy
+        // setupProxy(eventHubClientBuilder);
 
-            System.out.println("Responding to message " + counter.toString() + " with " + res.name());
+        // uncomment to use Web Sockets
+        // eventHubClientBuilder.transportType(AmqpTransportType.AMQP_WEB_SOCKETS);
 
-            counter.increment();
+        // Create an async consumer client as configured in the builder.
+        try (EventHubConsumerAsyncClient eventHubConsumerAsyncClient = eventHubClientBuilder
+                .buildAsyncConsumerClient()) {
 
-            return res;
-        }
-    }
+            receiveFromAllPartitions(eventHubConsumerAsyncClient);
 
-    // Our MQTT doesn't support abandon/reject, so we will only display the messaged
-    // received
-    // from IoTHub and return COMPLETE
-    protected static class MessageCallbackMqtt implements com.microsoft.azure.sdk.iot.device.MessageCallback {
-        public IotHubMessageResult execute(Message msg, Object context) {
-            Counter counter = (Counter) context;
-            System.out.println("Received message " + counter.toString() + " with content: "
-                    + new String(msg.getBytes(), Message.DEFAULT_IOTHUB_MESSAGE_CHARSET));
-            for (MessageProperty messageProperty : msg.getProperties()) {
-                System.out.println(messageProperty.getName() + " : " + messageProperty.getValue());
-            }
+            // uncomment to run these samples
+            // receiveFromSinglePartition(eventHubConsumerAsyncClient);
+            // receiveFromSinglePartitionInBatches(eventHubConsumerAsyncClient);
 
-            counter.increment();
-
-            return IotHubMessageResult.COMPLETE;
-        }
-    }
-
-    protected static class EventCallback implements IotHubEventCallback {
-        public void execute(IotHubStatusCode status, Object context) {
-            Message msg = (Message) context;
-            System.out.println("IoT Hub responded to message " + msg.getMessageId() + " with status " + status.name());
-            if (status == IotHubStatusCode.MESSAGE_CANCELLED_ONCLOSE) {
-                failedMessageListOnClose.add(msg.getMessageId());
-            }
-        }
-    }
-
-    protected static class IotHubConnectionStatusChangeCallbackLogger implements IotHubConnectionStatusChangeCallback {
-        @Override
-        public void execute(IotHubConnectionStatus status, IotHubConnectionStatusChangeReason statusChangeReason,
-                Throwable throwable, Object callbackContext) {
-            System.out.println();
-            System.out.println("CONNECTION STATUS UPDATE: " + status);
-            System.out.println("CONNECTION STATUS REASON: " + statusChangeReason);
-            System.out.println("CONNECTION STATUS THROWABLE: " + (throwable == null ? "null" : throwable.getMessage()));
-            System.out.println();
-
-            if (throwable != null) {
-                throwable.printStackTrace();
-            }
-
-            if (status == IotHubConnectionStatus.DISCONNECTED) {
-                System.out.println("The connection was lost, and is not being re-established."
-                        + " Look at provided exception for how to resolve this issue."
-                        + " Cannot send messages until this issue is resolved, and you manually re-open the device client");
-            } else if (status == IotHubConnectionStatus.DISCONNECTED_RETRYING) {
-                System.out.println("The connection was lost, but is being re-established."
-                        + " Can still send messages, but they won't be sent until the connection is re-established");
-            } else if (status == IotHubConnectionStatus.CONNECTED) {
-                System.out.println("The connection was successfully established. Can send messages.");
-            }
+            // Shut down cleanly.
+            System.out.println("Press ENTER to exit.");
+            System.in.read();
+            System.out.println("Shutting down...");
         }
     }
 
     /**
-     * Receives requests from an IoT Hub. Default protocol is to use use MQTT
-     * transport.
+     * This method receives events from all partitions asynchronously starting from
+     * the newly available events in each partition.
      *
-     * @param args args[0] = IoT Hub connection string args[1] = number of requests
-     *             to send args[2] = protocol (optional, one of 'mqtt' or 'amqps' or
-     *             'https' or 'amqps_ws') args[3] = path to certificate to enable
-     *             one-way authentication over ssl for amqps (optional, default
-     *             shall be used if unspecified).
+     * @param eventHubConsumerAsyncClient The {@link EventHubConsumerAsyncClient}.
      */
+    private static void receiveFromAllPartitions(EventHubConsumerAsyncClient eventHubConsumerAsyncClient) {
 
-    public static void main(String[] args) throws IOException, URISyntaxException {
-        System.out.println("Starting...");
-        System.out.println("Beginning setup.");
+        eventHubConsumerAsyncClient.receive(true) // set this to false to read only the newly available events
+                .subscribe(partitionEvent -> {
+                    System.out.println();
+                    System.out.printf("%nTelemetry received from partition %s:%n%s",
+                            partitionEvent.getPartitionContext().getPartitionId(),
+                            partitionEvent.getData().getBodyAsString());
+                    System.out.printf("%nApplication properties (set by device):%n%s",
+                            partitionEvent.getData().getProperties());
+                    System.out.printf("%nSystem properties (set by IoT Hub):%n%s",
+                            partitionEvent.getData().getSystemProperties());
+                }, ex -> {
+                    System.out.println("Error receiving events " + ex);
+                }, () -> {
+                    System.out.println("Completed receiving events");
+                });
+    }
 
-        String pathToCertificate = null;
-        if (args.length <= 1 || args.length >= 5) {
-            System.out.format("Expected 2 or 3 arguments but received: %d.\n"
-                    + "The program should be called with the following args: \n"
-                    + "1. [Device connection string] - String containing Hostname, Device Id & Device Key in one of the following formats: HostName=<iothub_host_name>;DeviceId=<device_id>;SharedAccessKey=<device_key>\n"
-                    + "2. [number of requests to send]\n" + "3. (mqtt | https | amqps | amqps_ws | mqtt_ws)\n"
-                    + "4. (optional) path to certificate to enable one-way authentication over ssl for amqps \n",
-                    args.length);
-            return;
-        }
+    /**
+     * This method queries all available partitions in the Event Hub and picks a
+     * single partition to receive events asynchronously starting from the newly
+     * available event in that partition.
+     *
+     * @param eventHubConsumerAsyncClient The {@link EventHubConsumerAsyncClient}.
+     */
+    private static void receiveFromSinglePartition(EventHubConsumerAsyncClient eventHubConsumerAsyncClient) {
+        eventHubConsumerAsyncClient.getPartitionIds() // get all available partitions
+                .take(1) // pick a single partition
+                .flatMap(partitionId -> {
+                    System.out.println("Receiving events from partition id " + partitionId);
+                    return eventHubConsumerAsyncClient.receiveFromPartition(partitionId, EventPosition.latest());
+                }).subscribe(partitionEvent -> {
+                    System.out.println();
+                    System.out.printf("%nTelemetry received from partition %s:%n%s",
+                            partitionEvent.getPartitionContext().getPartitionId(),
+                            partitionEvent.getData().getBodyAsString());
+                    System.out.printf("%nApplication properties (set by device):%n%s",
+                            partitionEvent.getData().getProperties());
+                    System.out.printf("%nSystem properties (set by IoT Hub):%n%s",
+                            partitionEvent.getData().getSystemProperties());
+                }, ex -> {
+                    System.out.println("Error receiving events " + ex);
+                }, () -> {
+                    System.out.println("Completed receiving events");
+                });
+    }
 
-        String connString = args[0];
-        int numRequests;
-        try {
-            numRequests = Integer.parseInt(args[1]);
-        } catch (NumberFormatException e) {
-            System.out.format(
-                    "Could not parse the number of requests to send. " + "Expected an int but received:\n%s.\n",
-                    args[1]);
-            return;
-        }
-        IotHubClientProtocol protocol;
-        if (args.length == 2) {
-            protocol = IotHubClientProtocol.MQTT;
-        } else {
-            String protocolStr = args[2];
-            if (protocolStr.equals("https")) {
-                protocol = IotHubClientProtocol.HTTPS;
-            } else if (protocolStr.equals("amqps")) {
-                protocol = IotHubClientProtocol.AMQPS;
-            } else if (protocolStr.equals("mqtt")) {
-                protocol = IotHubClientProtocol.MQTT;
-            } else if (protocolStr.equals("amqps_ws")) {
-                protocol = IotHubClientProtocol.AMQPS_WS;
-            } else if (protocolStr.equals("mqtt_ws")) {
-                protocol = IotHubClientProtocol.MQTT_WS;
-            } else {
-                System.out.format(
-                        "Expected argument 2 to be one of 'mqtt', 'https', 'amqps' or 'amqps_ws' but received %s\n"
-                                + "The program should be called with the following args: \n"
-                                + "1. [Device connection string] - String containing Hostname, Device Id & Device Key in one of the following formats: HostName=<iothub_host_name>;DeviceId=<device_id>;SharedAccessKey=<device_key>\n"
-                                + "2. [number of requests to send]\n"
-                                + "3. (mqtt | https | amqps | amqps_ws | mqtt_ws)\n"
-                                + "4. (optional) path to certificate to enable one-way authentication over ssl for amqps \n",
-                        protocolStr);
-                return;
-            }
+    /**
+     * This method queries all available partitions in the Event Hub and picks a
+     * single partition to receive events asynchronously in batches of 100 events,
+     * starting from the newly available event in that partition.
+     *
+     * @param eventHubConsumerAsyncClient The {@link EventHubConsumerAsyncClient}.
+     */
+    private static void receiveFromSinglePartitionInBatches(EventHubConsumerAsyncClient eventHubConsumerAsyncClient) {
+        int batchSize = 100;
+        eventHubConsumerAsyncClient.getPartitionIds().take(1).flatMap(partitionId -> {
+            System.out.println("Receiving events from partition id " + partitionId);
+            return eventHubConsumerAsyncClient.receiveFromPartition(partitionId, EventPosition.latest());
+        }).window(batchSize) // batch the events
+                .subscribe(partitionEvents -> {
+                    partitionEvents.toIterable().forEach(partitionEvent -> {
+                        System.out.println();
+                        System.out.printf("%nTelemetry received from partition %s:%n%s",
+                                partitionEvent.getPartitionContext().getPartitionId(),
+                                partitionEvent.getData().getBodyAsString());
+                        System.out.printf("%nApplication properties (set by device):%n%s",
+                                partitionEvent.getData().getProperties());
+                        System.out.printf("%nSystem properties (set by IoT Hub):%n%s",
+                                partitionEvent.getData().getSystemProperties());
+                    });
+                }, ex -> {
+                    System.out.println("Error receiving events " + ex);
+                }, () -> {
+                    System.out.println("Completed receiving events");
+                });
+    }
 
-            if (args.length == 3) {
-                pathToCertificate = null;
-            } else {
-                pathToCertificate = args[3];
-            }
-        }
+    /**
+     * This method sets up proxy options and updates the
+     * {@link EventHubClientBuilder}.
+     *
+     * @param eventHubClientBuilder The {@link EventHubClientBuilder}.
+     */
+    private static void setupProxy(EventHubClientBuilder eventHubClientBuilder) {
+        int proxyPort = 8000; // replace with right proxy port
+        String proxyHost = "{hostname}";
+        Proxy proxyAddress = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, proxyPort));
+        String userName = "{username}";
+        String password = "{password}";
+        ProxyOptions proxyOptions = new ProxyOptions(ProxyAuthenticationType.BASIC, proxyAddress, userName, password);
 
-        System.out.println("Successfully read input parameters.");
-        System.out.format("Using communication protocol %s.\n", protocol.name());
+        eventHubClientBuilder.proxyOptions(proxyOptions);
 
-        DeviceClient client = new DeviceClient(connString, protocol);
-        if (pathToCertificate != null) {
-            client.setOption("SetCertificatePath", pathToCertificate);
-        }
-
-        System.out.println("Successfully created an IoT Hub client.");
-
-        if (protocol == IotHubClientProtocol.MQTT) {
-            MessageCallbackMqtt callback = new MessageCallbackMqtt();
-            Counter counter = new Counter(0);
-            client.setMessageCallback(callback, counter);
-        } else {
-            MessageCallback callback = new MessageCallback();
-            Counter counter = new Counter(0);
-            client.setMessageCallback(callback, counter);
-        }
-
-        System.out.println("Successfully set message callback.");
-
-        // Set your token expiry time limit here
-        long time = 2400;
-        client.setOption("SetSASTokenExpiryTime", time);
-
-        client.registerConnectionStatusChangeCallback(new IotHubConnectionStatusChangeCallbackLogger(), new Object());
-
-        client.open();
-
-        System.out.println("Opened connection to IoT Hub.");
-
-        System.out.println("Beginning to receive messages...");
-
-        System.out.println("Sending the following event messages: ");
-
-        System.out.println("Updated token expiry time to " + time);
-
-        String deviceId = "MyJavaDevice";
-        double temperature;
-        double humidity;
-
-        for (int i = 0; i < numRequests; ++i) {
-            temperature = 20 + Math.random() * 10;
-            humidity = 30 + Math.random() * 20;
-
-            String msgStr = "{\"deviceId\":\"" + deviceId + "\",\"messageId\":" + i + ",\"temperature\":" + temperature
-                    + ",\"humidity\":" + humidity + "}";
-
-            try {
-                Message msg = new Message(msgStr);
-                msg.setContentTypeFinal("application/json");
-                msg.setProperty("temperatureAlert", temperature > 28 ? "true" : "false");
-                msg.setMessageId(java.util.UUID.randomUUID().toString());
-                msg.setExpiryTime(D2C_MESSAGE_TIMEOUT);
-                System.out.println(msgStr);
-                EventCallback eventCallback = new EventCallback();
-                client.sendEventAsync(msg, eventCallback, msg);
-            }
-
-            catch (Exception e) {
-                e.printStackTrace(); // Trace the exception
-            }
-
-        }
-
-        System.out.println("Wait for " + D2C_MESSAGE_TIMEOUT / 1000 + " second(s) for response from the IoT Hub...");
-
-        // Wait for IoT Hub to respond.
-        try {
-            Thread.sleep(D2C_MESSAGE_TIMEOUT);
-        }
-
-        catch (InterruptedException e) {
-            e.printStackTrace();
-        }
-
-        System.out.println(
-                "In receive mode. Waiting for receiving C2D messages (only for MQTT and AMQP). Press ENTER to close. To recieve in Https, send message and then start the sample.");
-
-        Scanner scanner = new Scanner(System.in);
-        scanner.nextLine();
-
-        // close the connection
-        System.out.println("Closing");
-        client.closeNow();
-
-        if (!failedMessageListOnClose.isEmpty()) {
-            System.out.println("List of messages that were cancelled on close:" + failedMessageListOnClose.toString());
-        }
-
-        System.out.println("Shutting down...");
+        // To use proxy, the transport type has to be Web Sockets.
+        eventHubClientBuilder.transportType(AmqpTransportType.AMQP_WEB_SOCKETS);
     }
 }
