@@ -14,22 +14,6 @@ import com.azure.messaging.eventhubs.models.EventPosition;
  * Handles messages from an IoT Hub. Default protocol is to use MQTT transport.
  */
 public class SendReceive {
-    private static final String EH_COMPATIBLE_CONNECTION_STRING_FORMAT = "Endpoint=%s/;EntityPath=%s;"
-    + "SharedAccessKeyName=%s;SharedAccessKey=%s";
-
-    // az iot hub show --query properties.eventHubEndpoints.events.endpoint --name
-    // {your IoT Hub name}
-    private static final String EVENT_HUBS_COMPATIBLE_ENDPOINT = "sb://iothub-ns-iothub-axw-9645102-73f6f9eaef.servicebus.windows.net/";
-
-    // az iot hub show --query properties.eventHubEndpoints.events.path --name {your
-    // IoT Hub name}
-    private static final String EVENT_HUBS_COMPATIBLE_PATH = "iothub-axwef";
-
-    // az iot hub policy show --name service --query primaryKey --hub-name {your IoT
-    // Hub name}
-    private static final String IOT_HUB_SAS_KEY = "XEHpNHL4Z6/EFKI9KDLoUDR3UBH/A2N9dFO43JLg0/U=";
-    private static final String IOT_HUB_SAS_KEY_NAME = "service";
-
     /**
      * The main method to start the sample application that receives events from
      * Event Hubs sent from an IoT Hub device.
@@ -40,8 +24,10 @@ public class SendReceive {
     public static void main(String[] args) throws Exception {
 
         // Build the Event Hubs compatible connection string.
-        String eventHubCompatibleConnectionString = String.format(EH_COMPATIBLE_CONNECTION_STRING_FORMAT,
-                EVENT_HUBS_COMPATIBLE_ENDPOINT, EVENT_HUBS_COMPATIBLE_PATH, IOT_HUB_SAS_KEY_NAME, IOT_HUB_SAS_KEY);
+        String eventHubCompatibleConnectionString = "Endpoint=sb://berlinhub.servicebus.windows.net/;" +
+        "SharedAccessKeyName=iothubroutes_iothub-axwef;" + 
+        "SharedAccessKey=Ph5WCU9NlJxkDrLBUvRPYJ3/AMGAx+8aXoq7mlaeQhE=;" +
+        "EntityPath=berlineventhub";
 
         // Setup the EventHubBuilder by configuring various options as needed.
         EventHubClientBuilder eventHubClientBuilder = new EventHubClientBuilder()
@@ -79,7 +65,7 @@ public class SendReceive {
      */
     private static void receiveFromAllPartitions(EventHubConsumerAsyncClient eventHubConsumerAsyncClient) {
 
-        eventHubConsumerAsyncClient.receive(true) // set this to false to read only the newly available events
+        eventHubConsumerAsyncClient.receive(false) // set this to false to read only the newly available events
                 .subscribe(partitionEvent -> {
                     System.out.println();
                     System.out.printf("%nTelemetry received from partition %s:%n%s",
